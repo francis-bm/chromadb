@@ -1,51 +1,46 @@
+version: "3.9"
+
 services:
   chromadb:
     image: ghcr.io/chroma-core/chroma:0.5.21
     container_name: chromadb
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      # Tell Chroma to persist into /chroma/chroma
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - IS_PERSISTENT=TRUE
+      PERSIST_DIRECTORY: /chroma/chroma
+      IS_PERSISTENT: "TRUE"
     volumes:
-      # Primary data store
       - chroma_data:/chroma/chroma
 
-  backup:
-    image: amazon/aws-cli:latest
+  chroma_backup:
+    image: amazon/aws-cli:2
     container_name: chroma_backup
     depends_on:
       - chromadb
-    restart: always
+    restart: unless-stopped
     environment:
-      # Provide your AWS credentials & bucket name via env_file or secrets
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-      - S3_BUCKET=${S3_BUCKET}      # e.g. my-org-chroma-backups
+      # Provide in .env or environment; sensible defaults shown
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-eu-west-2}
+      S3_BUCKET: ${S3_BUCKET}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     volumes:
-      # Mount the live data read‑only
-      - chroma_data:/data:ro
-      # Local snapshot store
-      - chroma_backups:/backups
-    entrypoint: >
-      sh -c "
-        # every 24h: snapshot + sync to S3
-        while true; do
-          TS=$(date +%F_%H%M)
-          echo \"[Backup] snapshot at \$TS\"
-          mkdir -p /backups/\$TS
-          cp -r /data/* /backups/\$TS/
-          echo \"[Backup] syncing /backups to s3://\$S3_BUCKET/\"
-          aws s3 sync /backups s3://\$S3_BUCKET/ --delete
-          sleep 86400
-        done
-      "
+      - chroma_data:/data:ro        # read-only mount of live Chroma data
+      - chroma_backups:/backups     # local rolling snapshots
+    entrypoint: ["/bin/sh","-c",
+      "while true; do TS=$(date +%F_%H%M%S); \
+       echo \"[backup] snapshot $TS\"; \
+       mkdir -p /backups/$TS; \
+       cp -a /data/. /backups/$TS/; \
+       echo \"[backup] syncing /backups to s3://$S3_BUCKET/\"; \
+       aws s3 sync /backups s3://$S3_BUCKET/ --delete; \
+       sleep ${BACKUP_INTERVAL_SECONDS}; \
+       done"
+    ]
+    # If the instance has an IAM role with S3 permissions, you can omit explicit AWS creds.
 
 volumes:
   chroma_data:
     driver: local
-
   chroma_backups:
     driver: local
